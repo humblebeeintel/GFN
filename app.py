@@ -1,6 +1,6 @@
 import time
 import ssl
-from PIL import Image
+from PIL import Image, ImageOps
 import tempfile
 import streamlit as st
 import torchvision.transforms.functional as TF
@@ -9,7 +9,6 @@ import numpy as np
 import torch.nn.functional as F
 import cv2
 import os
-from torchvision import transforms
 import torch
 torch._C._jit_override_can_fuse_on_cpu(False)
 torch._C._jit_override_can_fuse_on_gpu(False)
@@ -17,6 +16,16 @@ torch._C._jit_set_texpr_fuser_enabled(False)
 torch._C._jit_set_nvfuser_enabled(False)
 ssl._create_default_https_context = ssl._create_unverified_context
 
+def resize_and_pad(img, target_height, target_width):
+    aspect_ratio = img.width / img.height
+    new_width = int(target_height * aspect_ratio)
+    img_resized = img.resize((new_width, target_height), Image.Resampling.LANCZOS)
+    
+    delta_w = target_width - new_width
+    padding = (delta_w // 2, 0, delta_w - (delta_w // 2), 0)
+    img_padded = ImageOps.expand(img_resized, padding, fill=(255, 255, 255))
+
+    return img_padded
 
 # Convert PIL image to torch tensor
 def to_tensor(image, device='cuda'):
@@ -190,6 +199,10 @@ def display_images_with_labels(image_paths):
     # Calculate the number of columns needed
     num_images = len(image_paths)
     num_cols = min(num_images, 3)
+    
+    target_height = 200  # Adjust as needed
+    target_width = max(int(target_height * (img.width / img.height)) for img in image_paths)
+    
     # Dynamically create rows of images
     for i in range(0, num_images, num_cols):
         cols = st.columns(num_cols)
@@ -199,10 +212,10 @@ def display_images_with_labels(image_paths):
                     img_path = image_paths[i + idx]
 
                     img = img_path
-                    img = img.resize((20, 40))
+                    img_resized_padded = resize_and_pad(img, target_height, target_width)
 
-                    st.image(img, use_column_width=True)
-                    # Get the label from the user, if not provided use the default
+                    st.image(img_resized_padded, use_column_width=True)
+
                     agree = st.checkbox(f"Select Image {i + idx + 1}")
                     if agree:
                         label = st.text_input(
@@ -322,6 +335,11 @@ if submit:
     st.success("Labels submitted")
     print(labels)
     print(image_paths_corr)
-
+    # Save the labels and image paths to the query folder
+    os.makedirs("query", exist_ok=True)
+    
+    for i, image in enumerate(image_paths_corr):
+        image.save(f"query/{labels[i]}.jpg")
+    
     detect_and_highlight(video_path, image_paths_corr,
-                         'output.mp4', model, device, labels)
+                         'videos/output.mp4', model, device, labels)

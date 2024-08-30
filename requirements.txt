@@ -78,7 +78,6 @@ pure_eval==0.2.3
 pyarrow==17.0.0
 pyasn1==0.6.0
 pyasn1_modules==0.4.0
-pycocotools==2.0.8
 pycparser==2.22
 pydeck==0.9.1
 Pygments==2.18.0
@@ -95,9 +94,6 @@ requests-oauthlib==2.0.0
 rich==13.7.1
 rpds-py==0.20.0
 rsa==4.9
-scikit-image==0.24.0
-scikit-learn==1.5.1
-scipy==1.14.1
 Send2Trash==1.8.3
 six==1.16.0
 smmap==5.0.1

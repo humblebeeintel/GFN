@@ -2,6 +2,7 @@
 *.swp
 myenv/
 frames/
+videos/
 *.pt
 *.jpg
 *.mp4
