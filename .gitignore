@@ -1,2 +1,7 @@
 .DS_Store
 *.swp
+myenv/
+frames/
+*.pt
+*.jpg
+*.mp4
