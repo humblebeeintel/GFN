@@ -174,12 +174,14 @@ def detect_and_highlight(video_path, query_images, output_path, model, device, l
                 final_assignments[label] = detection
 
         for label, detection in final_assignments.items():
-            box = gallery_detect['det_boxes'][detection]
-            x1, y1, x2, y2 = map(int, box)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, label, (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36, 255, 12), 2)
-
+            try:
+                box = gallery_detect['det_boxes'][detection]
+                x1, y1, x2, y2 = map(int, box)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, label, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36, 255, 12), 2)
+            except:
+                pass
         out.write(frame)
         print("FPS: ", fps)
         frame_placeholder.image(frame, channels="BGR")
@@ -189,7 +191,7 @@ def detect_and_highlight(video_path, query_images, output_path, model, device, l
     cap.release()
     out.release()
 
-    st.video(output_path)
+    # st.video(output_path)
 
 
 def display_images_with_labels(image_paths):
