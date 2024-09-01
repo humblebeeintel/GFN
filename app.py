@@ -1,3 +1,6 @@
+from utils import display_images_with_labels, detect_and_highlight
+from utils import window_resize, capture_video, save_frame, get_gallery_values
+from utils import resize_and_pad, to_tensor, to_image, normalize, denormalize
 import time
 import ssl
 from PIL import Image, ImageOps
@@ -17,9 +20,6 @@ torch._C._jit_set_nvfuser_enabled(False)
 ssl._create_default_https_context = ssl._create_unverified_context
 
 # Import functions from utils.py
-from utils import resize_and_pad, to_tensor, to_image, normalize, denormalize
-from utils import window_resize, capture_video, save_frame, get_gallery_values
-from utils import display_images_with_labels, detect_and_highlight
 
 
 # Start
@@ -40,141 +40,132 @@ if 'crop_index' not in st.session_state:
 if 'crop_labels' not in st.session_state:
     st.session_state.crop_labels = []  # Store user labels
 
-video_file = st.file_uploader("Upload a video", type=[
-                              "mp4", "avi", "mov", "mkv"])
 
-if video_file is not None:
+def process_uploaded_video(video_file):
     tfile = tempfile.NamedTemporaryFile(delete=False)
     tfile.write(video_file.read())
-    video_path = tfile.name
+    return tfile.name
 
-    st.session_state.cap = capture_video(video_path)
 
-    if st.button("Play Video"):
-        st.session_state.playing = True
-
-    if st.button("Stop Video"):
-        st.session_state.playing = False
-        st.session_state.frame = st.session_state.current_frame
-
-    cap = st.session_state.cap
-    frame_placeholder = st.empty()
-
+def play_video(cap, frame_placeholder):
     while st.session_state.playing and cap.isOpened():
         ret, frame = cap.read()
-
         if not ret:
             st.warning("End of video")
             st.session_state.playing = False
             break
-
         st.session_state.current_frame = frame
         frame_placeholder.image(frame, channels="BGR")
-
         time.sleep(1 / 30)
 
+
+def save_current_frame():
     if st.session_state.frame is not None:
-        st.session_state.playing = False
         save_frame(st.session_state.frame)
 
-if os.path.exists('current_frame.jpg'):
-    img = Image.open('current_frame.jpg')
+
+def process_current_frame(img, model, device):
     gallery_detect_current, gallery_tensor_current = get_gallery_values(
         img, model, device)
     image = to_image(gallery_tensor_current)
 
     crops = []
-    for i, box in enumerate(gallery_detect_current['det_boxes'].cpu().tolist()):
-        x1, y1, x2, y2 = map(int, box)
-        width = x2 - x1
-        height = y2 - y1
-
-        expansion_x = width * 0.30
-        expansion_y = height * 0.30
-
-        new_x1 = max(0, x1 - expansion_x)
-        new_y1 = max(0, y1 - expansion_y)
-        new_x2 = min(image.width, x2 + expansion_x)
-        new_y2 = min(image.height, y2 + expansion_y)
-        new_x1, new_y1, new_x2, new_y2 = map(
-            int, (new_x1, new_y1, new_x2, new_y2))
-
-        crop = image.crop((new_x1, new_y1, new_x2, new_y2))
+    for box in gallery_detect_current['det_boxes'].cpu().tolist():
+        crop = crop_image_with_expansion(image, box)
         crops.append(crop)
 
-st.write("Wait for the video to finish processing before proceeding")
+    return crops
 
-try:
+
+def crop_image_with_expansion(image, box, expansion_ratio=0.20):
+    x1, y1, x2, y2 = map(int, box)
+    width, height = x2 - x1, y2 - y1
+
+    expansion_x = width * expansion_ratio
+    expansion_y = height * expansion_ratio
+
+    new_x1 = max(0, x1 - expansion_x)
+    new_y1 = max(0, y1 - expansion_y)
+    new_x2 = min(image.width, x2 + expansion_x)
+    new_y2 = min(image.height, y2 + expansion_y)
+
+    return image.crop((int(new_x1), int(new_y1), int(new_x2), int(new_y2)))
+
+
+def process_and_display_labels(crops, model):
     query_images = [crop.convert('RGB') for crop in crops]
-    labels, image_paths_corr, submit = display_images_with_labels(query_images)
-except:
-    st.error("No detections and crops to display. Please stop where some detections are visible")
+    labels, embeddings, submit = display_images_with_labels(
+        query_images, model)
+    return labels, embeddings, submit
 
-if submit:
-    st.success("Labels submitted and saved")
-    
-    # For debugging
-    print(labels)
-    print(image_paths_corr)
-    
-    # Save the labels and image paths to the query folder
+
+def save_embeddings(labels, embeddings):
     os.makedirs("query", exist_ok=True)
-    for i, image in enumerate(image_paths_corr):
-        image.save(f"query/{labels[i]}.jpg")
-    
-    try:
-        detect_and_highlight(video_path, image_paths_corr,
-                            'videos/output.mp4', model, device, labels, frame_placeholder=frame_placeholder)
-    except:
-        st.warning("No video to process. Please upload a video")
+    for label, emb in zip(labels, embeddings):
+        # Save embedings as numpy array
+        np.save(f"query/{label}.npy", emb.cpu().numpy())
 
 
-# RTSP CAMERA STREAM
-camera_stream_url = st.text_input("RTSP camera stream URL")
-if camera_stream_url:
-    try:
-        cap = cv2.VideoCapture(camera_stream_url)
-    except:
-        st.error("Failed to connect to the camera. Please check the URL")
-        st.stop()
+def start_webcam_stream(frame_placeholder):
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        st.error("Failed to connect to the camera.")
+        return
+
     st.session_state.playing = True
-    frame_placeholder = st.empty()
-    
-    # Model here to detect crimes and crop the image to query
-    
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            st.warning("Failed to capture frame from camera")
-            break
-
-        frame_placeholder.image(frame, channels="BGR")
-        time.sleep(1 / 30)
-    cap.release()
-
-
-
-# WEB-CAM STREAM
-if st.button("Start Webcam"):
-    try:
-        cap = cv2.VideoCapture(0)  # 0 is the default camera
-    except: 
-        st.error("Failed to connect to the camera. Please check if the camera is connected properly")
-    
-    st.session_state.playing = True
-    frame_placeholder = st.empty()
-    
-    
-    # Model here to detect crimes and crop the image to query
-    
-    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             st.warning("Failed to capture frame from webcam")
             break
-        
         frame_placeholder.image(frame, channels="BGR")
         time.sleep(1 / 30)
     cap.release()
+
+
+def main():
+    video_file = st.file_uploader("Upload a video", type=[
+                                  "mp4", "avi", "mov", "mkv"])
+
+    if video_file is not None:
+        video_path = process_uploaded_video(video_file)
+        st.session_state.cap = capture_video(video_path)
+
+        if st.button("Play Video"):
+            st.session_state.playing = True
+
+        if st.button("Label Identities: Kishilarni qayd etish"):
+            st.session_state.playing = False
+            st.session_state.frame = st.session_state.current_frame
+
+        frame_placeholder = st.empty()
+        play_video(st.session_state.cap, frame_placeholder)
+        save_current_frame()
+
+    if os.path.exists('current_frame.jpg'):
+        img = Image.open('current_frame.jpg')
+        crops = process_current_frame(img, model, device)
+
+        try:
+            labels, embeddings, submit = process_and_display_labels(
+                crops, model)
+        except:
+            st.error("No detections and crops to display.")
+
+        if submit:
+            st.success("Labels submitted and saved")
+            save_embeddings(labels, embeddings)
+
+            try:
+                detect_and_highlight(
+                    video_path, embeddings, 'videos/output.mp4', model, device, labels, frame_placeholder)
+            except:
+                st.warning("No video to process. Please upload a video")
+
+    if st.button("Start Webcam"):
+        frame_placeholder = st.empty()
+        start_webcam_stream(frame_placeholder)
+
+
+if __name__ == "__main__":
+    main()

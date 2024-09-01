@@ -6,3 +6,6 @@ videos/
 *.pt
 *.jpg
 *.mp4
+__pycache__/
+query/
+__pycache__/utils.cpython-310.pyc
