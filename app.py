@@ -1,170 +1,488 @@
-from utils import display_images_with_labels, detect_and_highlight
-from utils import window_resize, capture_video, save_frame, get_gallery_values
-from utils import resize_and_pad, to_tensor, to_image, normalize, denormalize
-import time
 import ssl
 from PIL import Image, ImageOps
-import tempfile
-import streamlit as st
+import os
 import torchvision.transforms.functional as TF
 from albumentations.augmentations.geometric import functional as FGeometric
 import numpy as np
-import torch.nn.functional as F
 import cv2
-import os
+import time
+import tempfile
+import torch.nn.functional as F
 import torch
+import streamlit as st
 torch._C._jit_override_can_fuse_on_cpu(False)
 torch._C._jit_override_can_fuse_on_gpu(False)
 torch._C._jit_set_texpr_fuser_enabled(False)
 torch._C._jit_set_nvfuser_enabled(False)
+
+
 ssl._create_default_https_context = ssl._create_unverified_context
 
-# Import functions from utils.py
-
-
-# Start
+# Set up the Streamlit page
+st.set_page_config(layout="wide")
 st.title("Video Query Detection App")
 
-# File uploaders
+# Load model
 device = torch.device('cuda')
 model = torch.jit.load(
     'cuhk_final_convnext-base_e30.torchscript.pt', map_location=device)
 
+# Initialize session state
 if 'playing' not in st.session_state:
     st.session_state.playing = False
 if 'frame' not in st.session_state:
     st.session_state.frame = None
-
 if 'crop_index' not in st.session_state:
-    st.session_state.crop_index = 0  # Track the current crop index
+    st.session_state.crop_index = 0
 if 'crop_labels' not in st.session_state:
-    st.session_state.crop_labels = []  # Store user labels
+    st.session_state.crop_labels = []
+if 'video_path' not in st.session_state:
+    st.session_state.video_path = None
+if 'stop_video' not in st.session_state:
+    import torch
+torch._C._jit_override_can_fuse_on_cpu(False)
+torch._C._jit_override_can_fuse_on_gpu(False)
+torch._C._jit_set_texpr_fuser_enabled(False)
+torch._C._jit_set_nvfuser_enabled(False)
 
 
-def process_uploaded_video(video_file):
+ssl._create_default_https_context = ssl._create_unverified_context
+
+# Set up the Streamlit page
+st.set_page_config(layout="wide")
+st.title("Video Query Detection App")
+
+# Load model
+device = torch.device('cuda')
+model = torch.jit.load(
+    'cuhk_final_convnext-base_e30.torchscript.pt', map_location=device)
+
+# Initialize session state
+if 'playing' not in st.session_state:
+    st.session_state.playing = False
+if 'frame' not in st.session_state:
+    st.session_state.frame = None
+if 'crop_index' not in st.session_state:
+    st.session_state.crop_index = 0
+if 'crop_labels' not in st.session_state:
+    st.session_state.crop_labels = []
+if 'video_path' not in st.session_state:
+    st.session_state.video_path = None
+if 'stop_video' not in st.session_state:
+    st.session_state.stop_video = False
+if 'gallery_detect' not in st.session_state:
+    st.session_state.gallery_detect = None
+if 'captured_crops' not in st.session_state:
+    st.session_state.captured_crops = []
+
+# Helper functions
+
+
+def process_uploaded_videoname(video_file):
     tfile = tempfile.NamedTemporaryFile(delete=False)
     tfile.write(video_file.read())
     return tfile.name
 
 
-def play_video(cap, frame_placeholder):
-    while st.session_state.playing and cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            st.warning("End of video")
-            st.session_state.playing = False
-            break
-        st.session_state.current_frame = frame
-        frame_placeholder.image(frame, channels="BGR")
-        time.sleep(1 / 30)
+def resize_and_pad(img, target_height, target_width):
+    aspect_ratio = img.width / img.height
+    new_width = int(target_height * aspect_ratio)
+    img_resized = img.resize((new_width, target_height),
+                             Image.Resampling.LANCZOS)
+    delta_w = target_width - new_width
+    padding = (delta_w // 2, 0, delta_w - (delta_w // 2), 0)
+    img_padded = ImageOps.expand(img_resized, padding, fill=(255, 255, 255))
+    return img_padded
 
 
-def save_current_frame():
-    if st.session_state.frame is not None:
-        save_frame(st.session_state.frame)
+def to_tensor(image, device='cuda'):
+    arr = np.array(image)
+    arr_resized = window_resize(arr)
+    tsr = torch.FloatTensor(arr_resized)
+    tsr_norm = normalize(tsr)
+    tsr_input = tsr_norm.permute(2, 0, 1).to(device)
+    return tsr_input
 
 
-def process_current_frame(img, model, device):
-    gallery_detect_current, gallery_tensor_current = get_gallery_values(
-        img, model, device)
-    image = to_image(gallery_tensor_current)
-
-    crops = []
-    for box in gallery_detect_current['det_boxes'].cpu().tolist():
-        crop = crop_image_with_expansion(image, box)
-        crops.append(crop)
-
-    return crops
+def normalize(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
+    mean = torch.FloatTensor(mean).view(1, 1, 3)
+    std = torch.FloatTensor(std).view(1, 1, 3)
+    return tensor.div(255.0).sub(mean).div(std)
 
 
-def crop_image_with_expansion(image, box, expansion_ratio=0.20):
-    x1, y1, x2, y2 = map(int, box)
-    width, height = x2 - x1, y2 - y1
-
-    expansion_x = width * expansion_ratio
-    expansion_y = height * expansion_ratio
-
-    new_x1 = max(0, x1 - expansion_x)
-    new_y1 = max(0, y1 - expansion_y)
-    new_x2 = min(image.width, x2 + expansion_x)
-    new_y2 = min(image.height, y2 + expansion_y)
-
-    return image.crop((int(new_x1), int(new_y1), int(new_x2), int(new_y2)))
+def window_resize(img, min_size=900, max_size=1500, interpolation=cv2.INTER_LINEAR):
+    height, width = img.shape[:2]
+    scale_factor = min_size / min(width, height)
+    if max(width, height) * scale_factor > max_size:
+        return FGeometric.longest_max_size(img, max_size=max_size, interpolation=interpolation)
+    else:
+        return FGeometric.smallest_max_size(img, max_size=min_size, interpolation=interpolation)
 
 
-def process_and_display_labels(crops, model):
-    query_images = [crop.convert('RGB') for crop in crops]
-    labels, embeddings, submit = display_images_with_labels(
-        query_images, model)
-    return labels, embeddings, submit
+def get_gallery_values(frame, model, device):
+    frame_tensor = to_tensor(frame).to(device)
+    with torch.no_grad():
+        detections_list = model([frame_tensor], inference_mode='det')
+    return detections_list[0], frame_tensor
 
 
-def save_embeddings(labels, embeddings):
-    os.makedirs("query", exist_ok=True)
-    for label, emb in zip(labels, embeddings):
-        # Save embedings as numpy array
-        np.save(f"query/{label}.npy", emb.cpu().numpy())
+def find_best_detections(person_sim_query):
+    best_detection_for_person = {}
+    for label, person_sim in person_sim_query.items():
+        best_sim, best_detection = torch.max(person_sim, 0)
+        if best_sim > 0.2:
+            detection_id = best_detection.item()
+            if detection_id not in best_detection_for_person or best_sim.item() > best_detection_for_person[detection_id][1]:
+                best_detection_for_person[detection_id] = (
+                    label, best_sim.item())
+    return best_detection_for_person
 
 
-def start_webcam_stream(frame_placeholder):
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.error("Failed to connect to the camera.")
-        return
+def annotate_frame_with_detections(frame, final_assignments, gallery_detect, labels):
+    for index, detection in final_assignments.items():
+        box = gallery_detect['det_boxes'][index]
+        x1, y1, x2, y2 = map(int, box)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        label, score = detection
+        cv2.putText(frame, f'{label} : {round(score,2)*100}%', (x1,
+                    y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36, 255, 12), 2)
 
-    st.session_state.playing = True
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            st.warning("Failed to capture frame from webcam")
-            break
-        frame_placeholder.image(frame, channels="BGR")
-        time.sleep(1 / 30)
-    cap.release()
+
+def load_db_embeddings():
+    labels = []
+    embeddings = []
+    for file in os.listdir("query_crops"):
+        if file.endswith(".npy"):
+            label = file.split(".")[0]
+            emb = torch.from_numpy(np.load(f"query_crops/{file}")).to(device)
+            labels.append(label)
+            embeddings.append(emb)
+    return labels, torch.stack(embeddings).to(device)
+
+
+def display_query_crops():
+    st.sidebar.header("Query Crops")
+    query_crop_dir = "query_crops"
+    if os.path.exists(query_crop_dir):
+        query_images = [img for img in os.listdir(
+            query_crop_dir) if img.endswith(('.png', '.jpg', '.jpeg'))]
+        num_cols = min(len(query_images), 3)
+        cols = st.sidebar.columns(num_cols)
+        for idx, img_name in enumerate(query_images):
+            img_path = os.path.join(query_crop_dir, img_name)
+            img = Image.open(img_path)
+            img_resized_padded = resize_and_pad(img, 150, 150)
+            cols[idx % num_cols].image(
+                img_resized_padded, caption=img_name, use_column_width=True)
+    else:
+        st.sidebar.write("No query crops available.")
+
+
+def capture_crop(frame, gallery_detect):
+    for _, box in enumerate(gallery_detect['det_boxes']):
+        x1, y1, x2, y2 = map(int, box)
+        crop_img = frame[y1:y2, x1:x2]
+        crop_img_small = cv2.resize(crop_img, (150, 150))
+        st.session_state.captured_crops.append((crop_img, crop_img_small))
+
+
+def save_crop(crop_img, crop_name, index):
+    query_crop_dir = "query_crops"
+    if not os.path.exists(query_crop_dir):
+        os.makedirs(query_crop_dir)
+    crop_path = os.path.join(query_crop_dir, f"{crop_name}.png")
+    cv2.imwrite(crop_path, crop_img)
+    embedding = st.session_state.gallery_detect['det_emb'][index].cpu(
+    ).detach().numpy().reshape(1, 2048)
+    embedding_path = os.path.join(query_crop_dir, f"{crop_name}.npy")
+    np.save(embedding_path, embedding)
+    st.sidebar.write(f"Crop and embedding saved as {crop_name}")
 
 
 def main():
     video_file = st.file_uploader("Upload a video", type=[
                                   "mp4", "avi", "mov", "mkv"])
+    if video_file:
+        st.session_state.video_path = process_uploaded_videoname(video_file)
 
-    if video_file is not None:
-        video_path = process_uploaded_video(video_file)
-        st.session_state.cap = capture_video(video_path)
+    labels, embeddings = load_db_embeddings()
 
-        if st.button("Play Video"):
-            st.session_state.playing = True
+    if st.sidebar.button("Show Query Crops"):
+        display_query_crops()
+    if st.sidebar.button("Start Video Feed"):
+        st.session_state.stop_video = False
+    if st.sidebar.button("Stop Video Feed"):
+        st.session_state.stop_video = True
+    if st.sidebar.button("Capture Crop"):
+        if st.session_state.frame is not None and st.session_state.gallery_detect is not None:
+            capture_crop(st.session_state.frame,
+                         st.session_state.gallery_detect)
+        else:
+            st.sidebar.warning(
+                "No frame or detection available to capture crop.")
 
-        if st.button("Label Identities: Kishilarni qayd etish"):
-            st.session_state.playing = False
-            st.session_state.frame = st.session_state.current_frame
+    crops_to_remove = []
+    for i, (crop_img, crop_img_small) in enumerate(st.session_state.captured_crops):
+        # Make crop RGB format
+        crop_img = cv2.cvtColor(crop_img, cv2.COLOR_RGB2BGR)
+        st.sidebar.image(
+            crop_img_small, caption=f"Captured Crop {i+1}", use_column_width=True, channels="BGR")
+        crop_name = st.sidebar.text_input(
+            f"Crop Name {i+1}", key=f"crop_name_{i}")
+        if crop_name:
+            save_crop(crop_img, crop_name, i)
+            crops_to_remove.append(i)
 
-        frame_placeholder = st.empty()
-        play_video(st.session_state.cap, frame_placeholder)
-        save_current_frame()
+    for i in sorted(crops_to_remove, reverse=True):
+        st.session_state.captured_crops.pop(i)
+    if st.session_state.video_path and not st.session_state.stop_video:
+        feed_placeholder = st.empty()
+        cap = cv2.VideoCapture(st.session_state.video_path)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        my_bar = st.progress(0, text="Operation in progress. Please wait...")
+        tick = time.time()
+        fps = 0
+        for frame_num in range(frame_count):
+            if st.session_state.stop_video:
+                break
+            ret, frame = cap.read()
+            if not ret:
+                st.warning("End of video")
+                break
 
-    if os.path.exists('current_frame.jpg'):
-        img = Image.open('current_frame.jpg')
-        crops = process_current_frame(img, model, device)
+            my_bar.progress((frame_num + 1) / frame_count,
+                            text=f"Processing frame {frame_num + 1} of {frame_count}...")
+            frame = cv2.resize(frame, (1200, 900))
+            gallery_detect, _ = get_gallery_values(frame, model, device)
+            st.session_state.gallery_detect = gallery_detect
+            person_sim_query = {
+                labels[b]: torch.mm(F.normalize(emb, dim=1), F.normalize(
+                    gallery_detect['det_emb'], dim=1).T).flatten()
+                for b, emb in enumerate(embeddings)
+            }
 
-        try:
-            labels, embeddings, submit = process_and_display_labels(
-                crops, model)
-        except:
-            st.error("No detections and crops to display.")
+            best_detection_for_person = find_best_detections(person_sim_query)
+            annotate_frame_with_detections(
+                frame, best_detection_for_person, gallery_detect, labels)
+            st.session_state.frame = frame
+            cv2.putText(frame, f'FPS: {fps}', (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, f'Frame ID: {frame_num + 1}', (10, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+            feed_placeholder.image(frame, channels="BGR")
+            tock = time.time()
+            fps = round(1 / (tock - tick), 2)
+            tick = tock
+        my_bar.empty()
+        cap.release()
 
-        if submit:
-            st.success("Labels submitted and saved")
-            save_embeddings(labels, embeddings)
 
-            try:
-                detect_and_highlight(
-                    video_path, embeddings, 'videos/output.mp4', model, device, labels, frame_placeholder)
-            except:
-                st.warning("No video to process. Please upload a video")
+if __name__ == "__main__":
+    main()
 
-    if st.button("Start Webcam"):
-        frame_placeholder = st.empty()
-        start_webcam_stream(frame_placeholder)
+if 'captured_crops' not in st.session_state:
+    st.session_state.captured_crops = []
+
+# Helper functions
+
+
+def process_uploaded_videoname(video_file):
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(video_file.read())
+    return tfile.name
+
+
+def resize_and_pad(img, target_height, target_width):
+    aspect_ratio = img.width / img.height
+    new_width = int(target_height * aspect_ratio)
+    img_resized = img.resize((new_width, target_height),
+                             Image.Resampling.LANCZOS)
+    delta_w = target_width - new_width
+    padding = (delta_w // 2, 0, delta_w - (delta_w // 2), 0)
+    img_padded = ImageOps.expand(img_resized, padding, fill=(255, 255, 255))
+    return img_padded
+
+
+def to_tensor(image, device='cuda'):
+    arr = np.array(image)
+    arr_resized = window_resize(arr)
+    tsr = torch.FloatTensor(arr_resized)
+    tsr_norm = normalize(tsr)
+    tsr_input = tsr_norm.permute(2, 0, 1).to(device)
+    return tsr_input
+
+
+def normalize(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
+    mean = torch.FloatTensor(mean).view(1, 1, 3)
+    std = torch.FloatTensor(std).view(1, 1, 3)
+    return tensor.div(255.0).sub(mean).div(std)
+
+
+def window_resize(img, min_size=900, max_size=1500, interpolation=cv2.INTER_LINEAR):
+    height, width = img.shape[:2]
+    scale_factor = min_size / min(width, height)
+    if max(width, height) * scale_factor > max_size:
+        return FGeometric.longest_max_size(img, max_size=max_size, interpolation=interpolation)
+    else:
+        return FGeometric.smallest_max_size(img, max_size=min_size, interpolation=interpolation)
+
+
+def get_gallery_values(frame, model, device):
+    frame_tensor = to_tensor(frame).to(device)
+    with torch.no_grad():
+        detections_list = model([frame_tensor], inference_mode='det')
+    return detections_list[0], frame_tensor
+
+
+def find_best_detections(person_sim_query):
+    best_detection_for_person = {}
+    for label, person_sim in person_sim_query.items():
+        best_sim, best_detection = torch.max(person_sim, 0)
+        if best_sim > 0.2:
+            detection_id = best_detection.item()
+            if detection_id not in best_detection_for_person or best_sim.item() > best_detection_for_person[detection_id][1]:
+                best_detection_for_person[detection_id] = (
+                    label, best_sim.item())
+    return best_detection_for_person
+
+
+def annotate_frame_with_detections(frame, final_assignments, gallery_detect, labels):
+    for index, detection in final_assignments.items():
+        box = gallery_detect['det_boxes'][index]
+        x1, y1, x2, y2 = map(int, box)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        label, score = detection
+        cv2.putText(frame, f'{label} : {round(score,2)*100}%', (x1,
+                    y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36, 255, 12), 2)
+
+
+def load_db_embeddings():
+    labels = []
+    embeddings = []
+    for file in os.listdir("query_crops"):
+        if file.endswith(".npy"):
+            label = file.split(".")[0]
+            emb = torch.from_numpy(np.load(f"query_crops/{file}")).to(device)
+            labels.append(label)
+            embeddings.append(emb)
+    return labels, torch.stack(embeddings).to(device)
+
+
+def display_query_crops():
+    st.sidebar.header("Query Crops")
+    query_crop_dir = "query_crops"
+    if os.path.exists(query_crop_dir):
+        query_images = [img for img in os.listdir(
+            query_crop_dir) if img.endswith(('.png', '.jpg', '.jpeg'))]
+        num_cols = min(len(query_images), 3)
+        cols = st.sidebar.columns(num_cols)
+        for idx, img_name in enumerate(query_images):
+            img_path = os.path.join(query_crop_dir, img_name)
+            img = Image.open(img_path)
+            img_resized_padded = resize_and_pad(img, 150, 150)
+            cols[idx % num_cols].image(
+                img_resized_padded, caption=img_name, use_column_width=True)
+    else:
+        st.sidebar.write("No query crops available.")
+
+
+def capture_crop(frame, gallery_detect):
+    for _, box in enumerate(gallery_detect['det_boxes']):
+        x1, y1, x2, y2 = map(int, box)
+        crop_img = frame[y1:y2, x1:x2]
+        crop_img_small = cv2.resize(crop_img, (150, 150))
+        st.session_state.captured_crops.append((crop_img, crop_img_small))
+
+
+def save_crop(crop_img, crop_name, index):
+    query_crop_dir = "query_crops"
+    if not os.path.exists(query_crop_dir):
+        os.makedirs(query_crop_dir)
+    crop_path = os.path.join(query_crop_dir, f"{crop_name}.png")
+    cv2.imwrite(crop_path, crop_img)
+    embedding = st.session_state.gallery_detect['det_emb'][index].cpu(
+    ).detach().numpy().reshape(1, 2048)
+    embedding_path = os.path.join(query_crop_dir, f"{crop_name}.npy")
+    np.save(embedding_path, embedding)
+    st.sidebar.write(f"Crop and embedding saved as {crop_name}")
+
+
+def main():
+    video_file = st.file_uploader("Upload a video", type=[
+                                  "mp4", "avi", "mov", "mkv"])
+    if video_file:
+        st.session_state.video_path = process_uploaded_videoname(video_file)
+
+    labels, embeddings = load_db_embeddings()
+
+    if st.sidebar.button("Show Query Crops"):
+        display_query_crops()
+    if st.sidebar.button("Start Video Feed"):
+        st.session_state.stop_video = False
+    if st.sidebar.button("Stop Video Feed"):
+        st.session_state.stop_video = True
+    if st.sidebar.button("Capture Crop"):
+        if st.session_state.frame is not None and st.session_state.gallery_detect is not None:
+            capture_crop(st.session_state.frame,
+                         st.session_state.gallery_detect)
+        else:
+            st.sidebar.warning(
+                "No frame or detection available to capture crop.")
+
+    crops_to_remove = []
+    for i, (crop_img, crop_img_small) in enumerate(st.session_state.captured_crops):
+        # Make crop RGB format
+        crop_img = cv2.cvtColor(crop_img, cv2.COLOR_RGB2BGR)
+        st.sidebar.image(
+            crop_img_small, caption=f"Captured Crop {i+1}", use_column_width=True, channels="BGR")
+        crop_name = st.sidebar.text_input(
+            f"Crop Name {i+1}", key=f"crop_name_{i}")
+        if crop_name:
+            save_crop(crop_img, crop_name, i)
+            crops_to_remove.append(i)
+
+    for i in sorted(crops_to_remove, reverse=True):
+        st.session_state.captured_crops.pop(i)
+    if st.session_state.video_path and not st.session_state.stop_video:
+        feed_placeholder = st.empty()
+        cap = cv2.VideoCapture(st.session_state.video_path)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        my_bar = st.progress(0, text="Operation in progress. Please wait...")
+        tick = time.time()
+        fps = 0
+        for frame_num in range(frame_count):
+            if st.session_state.stop_video:
+                break
+            ret, frame = cap.read()
+            if not ret:
+                st.warning("End of video")
+                break
+
+            my_bar.progress((frame_num + 1) / frame_count,
+                            text=f"Processing frame {frame_num + 1} of {frame_count}...")
+            frame = cv2.resize(frame, (1200, 900))
+            gallery_detect, _ = get_gallery_values(frame, model, device)
+            st.session_state.gallery_detect = gallery_detect
+            person_sim_query = {
+                labels[b]: torch.mm(F.normalize(emb, dim=1), F.normalize(
+                    gallery_detect['det_emb'], dim=1).T).flatten()
+                for b, emb in enumerate(embeddings)
+            }
+
+            best_detection_for_person = find_best_detections(person_sim_query)
+            annotate_frame_with_detections(
+                frame, best_detection_for_person, gallery_detect, labels)
+            st.session_state.frame = frame
+            cv2.putText(frame, f'FPS: {fps}', (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, f'Frame ID: {frame_num + 1}', (10, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+            feed_placeholder.image(frame, channels="BGR")
+            tock = time.time()
+            fps = round(1 / (tock - tick), 2)
+            tick = tock
+        my_bar.empty()
+        cap.release()
 
 
 if __name__ == "__main__":
